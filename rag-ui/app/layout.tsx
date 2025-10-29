@@ -12,14 +12,14 @@ export const metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    // ThemeProviderWrapper ko html ke upar rakha
-    <ThemeProviderWrapper>
-      <html lang="en" suppressHydrationWarning>
-        <body className={`${geist.className} bg-gray-100 dark:bg-gray-900`}>
+    <html lang="en">
+      <body className={`${geist.className} bg-gray-100 dark:bg-gray-900`}>
+        {/* ThemeProviderWrapper must be inside <body> */}
+        <ThemeProviderWrapper>
           <Navbar />
           {children}
-        </body>
-      </html>
-    </ThemeProviderWrapper>
+        </ThemeProviderWrapper>
+      </body>
+    </html>
   );
 }

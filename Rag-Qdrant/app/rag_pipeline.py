@@ -9,7 +9,7 @@ from langchain_community.document_loaders import (
 )
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Qdrant
+from langchain_qdrant import Qdrant
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.schema import Document
 from qdrant_client import QdrantClient
@@ -30,7 +30,7 @@ class RAGPipeline:
         # ---- Conversation Memory ----
         self.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 
-    # ---------------- Existing methods unchanged ----------------
+    # ---------------- File loading ----------------
     def load_file(self, file_path):
         ext = os.path.splitext(file_path)[-1].lower()
         if ext == ".pdf":
@@ -45,6 +45,7 @@ class RAGPipeline:
             raise ValueError("Unsupported file type!")
         return loader.load()
 
+    # ---------------- Text splitting ----------------
     def split_text(self, documents):
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=2000,
@@ -53,9 +54,11 @@ class RAGPipeline:
         )
         return splitter.split_documents(documents)
 
+    # ---------------- Embeddings ----------------
     def get_embeddings(self):
         return HuggingFaceEmbeddings(model_name=self.embedding_model)
 
+    # ---------------- Store documents in Qdrant ----------------
     def store_in_qdrant(self, docs, embeddings):
         try:
             return Qdrant.from_documents(
@@ -97,6 +100,7 @@ class RAGPipeline:
 
             return Qdrant(client=client, collection_name=self.collection_name, embeddings=embeddings)
 
+    # ---------------- Ingest plain text ----------------
     def ingest_text(self, text):
         if not text.strip():
             raise ValueError("Text content is empty!")
@@ -107,6 +111,7 @@ class RAGPipeline:
         self.store_in_qdrant(chunks, embeddings)
         return len(chunks)
 
+    # ---------------- Ask query ----------------
     def ask(self, query):
         try:
             if not query.strip():
@@ -119,7 +124,6 @@ class RAGPipeline:
 
             related_docs = retriever.get_relevant_documents(query)
             context = "\n".join([d.page_content for d in related_docs])
-
             chat_history = self.memory.load_memory_variables({}).get("chat_history", "")
 
             prompt = f"""
@@ -149,7 +153,7 @@ Answer clearly and conversationally:
         except Exception as e:
             return {"error": f"❌ Gemini request failed: {str(e)}"}
 
-    # ---------------- NEW METHOD: Line-by-line streaming ----------------
+    # ---------------- Ask query streaming ----------------
     def ask_stream(self, query):
         """
         Generator to yield response text line by line (or chunk by chunk)
@@ -190,12 +194,10 @@ Answer clearly and conversationally:
             response = llm.invoke(prompt)
             answer = response.content if hasattr(response, "content") else str(response)
 
-            # Yield line by line
             for line in answer.split("\n"):
                 yield line + "\n"
-                time.sleep(0.05)  # optional typing effect
+                time.sleep(0.05)
 
-            # Save to memory after streaming
             self.memory.save_context({"input": query}, {"output": answer})
 
         except Exception as e:
