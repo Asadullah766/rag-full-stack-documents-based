@@ -1,27 +1,41 @@
 import os
 import time
 import uuid
+import hashlib
+
+# Document loaders
 from langchain_community.document_loaders import (
     PyPDFLoader,
     TextLoader,
     Docx2txtLoader,
-    CSVLoader
+    CSVLoader,
 )
+
+# Text splitting
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_qdrant import Qdrant
-from langchain_google_genai import ChatGoogleGenerativeAI
+
+# Conversation memory
+from langchain.memory import ConversationBufferMemory
+
+# Document schema
 from langchain.schema import Document
+
+# Vector store + Embeddings
+from langchain_community.vectorstores import Qdrant
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance
+from langchain_community.embeddings import HuggingFaceEmbeddings
+
+# Config + Utils
 from app.config import settings
-from langchain.memory import ConversationBufferMemory
+from app.utils.embeddings import get_embeddings_model
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 
 class RAGPipeline:
     def __init__(self):
         # ---- Basic configs ----
-        self.embedding_model = settings.EMBEDDING_MODEL
+        self.embedding_model = get_embeddings_model()
         self.qdrant_url = settings.QDRANT_URL
         self.qdrant_api_key = settings.QDRANT_API_KEY
         self.collection_name = settings.VECTOR_COLLECTION_NAME
@@ -29,6 +43,34 @@ class RAGPipeline:
 
         # ---- Conversation Memory ----
         self.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+        # ---- Qdrant Client ----
+        self.client = QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key, timeout=180)
+
+        # ✅ Auto detect embedding dimension (384 / 768 / etc)
+        try:
+            self.vector_size = len(self.embedding_model.embed_query("test"))
+        except Exception as e:
+            print(f"⚠️ Could not detect embedding size automatically: {e}")
+            self.vector_size = 768  # fallback default
+
+        # Ensure collection setup
+        self._ensure_collection()
+
+    # ---------------- Ensure Qdrant collection exists ----------------
+    def _ensure_collection(self):
+        try:
+            if self.collection_name not in [c.name for c in self.client.get_collections().collections]:
+                print(f"🆕 Creating Qdrant collection '{self.collection_name}' (dim={self.vector_size})...")
+                self.client.recreate_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
+                )
+                print(f"✅ Collection '{self.collection_name}' created successfully.")
+            else:
+                print(f"✅ Collection '{self.collection_name}' already exists.")
+        except Exception as e:
+            print(f"❌ Failed to ensure collection: {e}")
 
     # ---------------- File loading ----------------
     def load_file(self, file_path):
@@ -42,7 +84,7 @@ class RAGPipeline:
         elif ext == ".csv":
             loader = CSVLoader(file_path)
         else:
-            raise ValueError("Unsupported file type!")
+            raise ValueError("❌ Unsupported file type!")
         return loader.load()
 
     # ---------------- Text splitting ----------------
@@ -50,83 +92,81 @@ class RAGPipeline:
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=2000,
             chunk_overlap=200,
-            length_function=len
+            length_function=len,
         )
         return splitter.split_documents(documents)
 
-    # ---------------- Embeddings ----------------
-    def get_embeddings(self):
-        return HuggingFaceEmbeddings(model_name=self.embedding_model)
+    # ---------------- Unique hash for deduplication ----------------
+    def _doc_hash(self, doc: Document):
+        content = doc.page_content or ""
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     # ---------------- Store documents in Qdrant ----------------
-    def store_in_qdrant(self, docs, embeddings):
-        try:
-            return Qdrant.from_documents(
-                docs,
-                embeddings,
-                url=self.qdrant_url,
-                collection_name=self.collection_name,
-                api_key=self.qdrant_api_key,
-                prefer_grpc=False,
-            )
-        except Exception as e:
-            print(f"⚠️ Qdrant direct insert failed, retrying manually: {e}")
-            time.sleep(2)
-            client = QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key, timeout=180)
-            vector_size = len(embeddings.embed_documents(["test"])[0])
+    def store_in_qdrant(self, docs):
+        if not docs:
+            print("⚠️ No documents to insert into Qdrant.")
+            return 0
 
-            try:
-                client.create_collection(
-                    collection_name=self.collection_name,
-                    vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE)
-                )
-            except Exception:
-                pass
+        inserted_count = 0
+        batch_size = 20
 
-            batch_size = 20
-            for i in range(0, len(docs), batch_size):
-                batch = docs[i:i + batch_size]
-                vectors = embeddings.embed_documents([d.page_content for d in batch])
-                points = [
-                    {
+        for i in range(0, len(docs), batch_size):
+            batch = docs[i:i + batch_size]
+            points_to_insert = []
+
+            for d in batch:
+                try:
+                    vector = self.embedding_model.embed_documents([d.page_content])[0]
+                    points_to_insert.append({
                         "id": str(uuid.uuid4()),
-                        "vector": v,
-                        "payload": {**d.metadata, "page_content": d.page_content}
-                    }
-                    for d, v in zip(batch, vectors)
-                ]
-                client.upsert(collection_name=self.collection_name, points=points)
-                print(f"Inserted {min(i + batch_size, len(docs))}/{len(docs)}")
+                        "vector": vector,
+                        "payload": {
+                            "page_content": d.page_content,
+                            **d.metadata,
+                            "doc_hash": self._doc_hash(d),
+                        },
+                    })
+                except Exception as e:
+                    print(f"⚠️ Skipped a document chunk due to embedding error: {e}")
 
-            return Qdrant(client=client, collection_name=self.collection_name, embeddings=embeddings)
+            if points_to_insert:
+                try:
+                    self.client.upsert(collection_name=self.collection_name, points=points_to_insert)
+                    inserted_count += len(points_to_insert)
+                except Exception as e:
+                    print(f"❌ Failed to upsert batch: {e}")
+
+        print(f"✅ Inserted {inserted_count} documents into Qdrant.")
+        return inserted_count
 
     # ---------------- Ingest plain text ----------------
     def ingest_text(self, text):
         if not text.strip():
-            raise ValueError("Text content is empty!")
-
+            raise ValueError("⚠️ Text content is empty!")
         docs = [Document(page_content=text)]
         chunks = self.split_text(docs)
-        embeddings = self.get_embeddings()
-        self.store_in_qdrant(chunks, embeddings)
-        return len(chunks)
+        return self.store_in_qdrant(chunks)
 
     # ---------------- Ask query ----------------
     def ask(self, query):
-        try:
-            if not query.strip():
-                return {"error": "Query is missing"}
+        if not query.strip():
+            return {"error": "Query is missing"}
 
-            embeddings = self.get_embeddings()
-            client = QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key, timeout=180)
-            qdrant_store = Qdrant(client=client, collection_name=self.collection_name, embeddings=embeddings)
-            retriever = qdrant_store.as_retriever(search_kwargs={"k": 4})
+        qdrant_store = Qdrant(
+            client=self.client,
+            collection_name=self.collection_name,
+            embeddings=self.embedding_model,
+        )
+        retriever = qdrant_store.as_retriever(search_kwargs={"k": 4})
+        related_docs = retriever.get_relevant_documents(query)
 
-            related_docs = retriever.get_relevant_documents(query)
-            context = "\n".join([d.page_content for d in related_docs])
-            chat_history = self.memory.load_memory_variables({}).get("chat_history", "")
+        if not related_docs:
+            return {"answer": "No relevant context found in Qdrant."}
 
-            prompt = f"""
+        context = "\n".join([d.page_content for d in related_docs])
+        chat_history = self.memory.load_memory_variables({}).get("chat_history", "")
+
+        prompt = f"""
 Previous conversation:
 {chat_history}
 
@@ -135,40 +175,44 @@ User asked: {query}
 Relevant context:
 {context}
 
-Answer clearly and conversationally:
+Answer clearly, accurately, and conversationally:
 """
 
-            llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash-exp",
-                google_api_key=self.gemini_api_key,
-                temperature=0.3,
-            )
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.0-flash",
+            api_key=self.gemini_api_key,
+            temperature=0.3,
+            max_output_tokens=500,
+        )
+
+        try:
             response = llm.invoke(prompt)
-            answer = response.content if hasattr(response, "content") else str(response)
-
+            answer = getattr(response, "content", str(response))
             self.memory.save_context({"input": query}, {"output": answer})
-
             return {"answer": answer}
-
         except Exception as e:
-            return {"error": f"❌ Gemini request failed: {str(e)}"}
+            return {"error": f"Gemini API failed: {e}"}
 
-    # ---------------- Ask query streaming ----------------
+    # ---------------- Ask query (Streaming) ----------------
     def ask_stream(self, query):
-        """
-        Generator to yield response text line by line (or chunk by chunk)
-        """
         try:
             if not query.strip():
                 yield "Error: Query is missing"
                 return
 
-            embeddings = self.get_embeddings()
-            client = QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key, timeout=180)
-            qdrant_store = Qdrant(client=client, collection_name=self.collection_name, embeddings=embeddings)
-            retriever = qdrant_store.as_retriever(search_kwargs={"k": 4})
+            qdrant_store = Qdrant(
+                client=self.client,
+                collection_name=self.collection_name,
+                embeddings=self.embedding_model,
+            )
 
+            retriever = qdrant_store.as_retriever(search_kwargs={"k": 4})
             related_docs = retriever.get_relevant_documents(query)
+
+            if not related_docs:
+                yield "No relevant documents found.\n"
+                return
+
             context = "\n".join([d.page_content for d in related_docs])
             chat_history = self.memory.load_memory_variables({}).get("chat_history", "")
 
@@ -185,14 +229,14 @@ Answer clearly and conversationally:
 """
 
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash-exp",
-                google_api_key=self.gemini_api_key,
+                model="gemini-2.0-flash",
+                api_key=self.gemini_api_key,
                 temperature=0.3,
-                max_output_tokens=500
+                max_output_tokens=500,
             )
 
             response = llm.invoke(prompt)
-            answer = response.content if hasattr(response, "content") else str(response)
+            answer = getattr(response, "content", str(response))
 
             for line in answer.split("\n"):
                 yield line + "\n"

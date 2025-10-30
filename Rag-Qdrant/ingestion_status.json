@@ -1,7 +1,10 @@
 {
   "python.pdf": {
-    "status": "failed",
-    "progress": 0
+    "status": "completed",
+    "progress": 100
   },
-  "Global Warming.docx": "completed"
+  "Global Warming.docx": {
+    "status": "completed",
+    "progress": 100
+  }
 }

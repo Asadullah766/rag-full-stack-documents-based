@@ -1,0 +1,39 @@
+# FastAPI & Server
+fastapi==0.115.0
+uvicorn[standard]==0.31.0
+python-multipart==0.0.9
+starlette==0.38.6
+aiofiles==24.1.0
+
+# Core dependencies for LangChain ecosystem
+pydantic==2.9.2
+pydantic-core==2.23.4
+
+# Qdrant Vector Store
+qdrant-client==1.15.1
+
+# Embeddings and Transformers
+huggingface-hub==0.25.2
+transformers==4.45.2
+torch==2.2.2
+sentence-transformers==2.2.2
+
+# Google Gemini (Generative AI)
+google-ai-generativelanguage==0.6.10
+google-generativeai==0.8.3
+langchain-google-genai==2.0.9
+
+# LangChain ecosystem (stable versions, compatible with Google GenAI)
+langchain==0.3.8
+langchain-core==0.3.29
+langchain-community==0.3.8
+langchain-text-splitters==0.3.3
+langsmith==0.1.131
+
+# Utilities
+python-dotenv==1.0.1
+numpy==1.26.4
+pandas==2.2.3
+tqdm==4.66.5
+requests==2.32.3
+orjson==3.11.4
