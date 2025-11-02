@@ -1,10 +1,14 @@
 {
-  "python.pdf": {
-    "status": "completed",
-    "progress": 100
-  },
   "Global Warming.docx": {
     "status": "completed",
-    "progress": 100
+    "progress": 100,
+    "file_id": "41e7f3e5-fbdb-48c8-8f75-2a20c8dcccb7",
+    "chunks": 14
+  },
+  "python.pdf": {
+    "status": "completed",
+    "progress": 100,
+    "file_id": "71668aac-a554-4362-9b20-3a0b47d15386",
+    "chunks": 462
   }
 }

@@ -2,158 +2,150 @@ import os
 import time
 import uuid
 import hashlib
+import traceback
 
-# Document loaders
-from langchain_community.document_loaders import (
-    PyPDFLoader,
-    TextLoader,
-    Docx2txtLoader,
-    CSVLoader,
-)
-
-# Text splitting
+from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader, CSVLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-
-# Conversation memory
 from langchain.memory import ConversationBufferMemory
-
-# Document schema
 from langchain.schema import Document
-
-# Vector store + Embeddings
 from langchain_community.vectorstores import Qdrant
 from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from qdrant_client.http import models
+from langchain_google_genai import ChatGoogleGenerativeAI
 
-# Config + Utils
 from app.config import settings
 from app.utils.embeddings import get_embeddings_model
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 
 class RAGPipeline:
     def __init__(self):
-        # ---- Basic configs ----
         self.embedding_model = get_embeddings_model()
-        self.qdrant_url = settings.QDRANT_URL
-        self.qdrant_api_key = settings.QDRANT_API_KEY
         self.collection_name = settings.VECTOR_COLLECTION_NAME
+        self.qdrant_client = QdrantClient(
+            url=settings.QDRANT_URL, 
+            api_key=settings.QDRANT_API_KEY, 
+            timeout=180
+        )
         self.gemini_api_key = settings.GEMINI_API_KEY
 
-        # ---- Conversation Memory ----
-        self.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
-        # ---- Qdrant Client ----
-        self.client = QdrantClient(url=self.qdrant_url, api_key=self.qdrant_api_key, timeout=180)
-
-        # ✅ Auto detect embedding dimension (384 / 768 / etc)
+        # Determine vector size
         try:
             self.vector_size = len(self.embedding_model.embed_query("test"))
-        except Exception as e:
-            print(f"⚠️ Could not detect embedding size automatically: {e}")
-            self.vector_size = 768  # fallback default
+        except:
+            self.vector_size = 768
 
-        # Ensure collection setup
         self._ensure_collection()
 
-    # ---------------- Ensure Qdrant collection exists ----------------
+    # ---------------- Qdrant Collection ----------------
     def _ensure_collection(self):
-        try:
-            if self.collection_name not in [c.name for c in self.client.get_collections().collections]:
-                print(f"🆕 Creating Qdrant collection '{self.collection_name}' (dim={self.vector_size})...")
-                self.client.recreate_collection(
-                    collection_name=self.collection_name,
-                    vectors_config=VectorParams(size=self.vector_size, distance=Distance.COSINE),
-                )
-                print(f"✅ Collection '{self.collection_name}' created successfully.")
-            else:
-                print(f"✅ Collection '{self.collection_name}' already exists.")
-        except Exception as e:
-            print(f"❌ Failed to ensure collection: {e}")
-
-    # ---------------- File loading ----------------
-    def load_file(self, file_path):
-        ext = os.path.splitext(file_path)[-1].lower()
-        if ext == ".pdf":
-            loader = PyPDFLoader(file_path)
-        elif ext == ".txt":
-            loader = TextLoader(file_path)
-        elif ext == ".docx":
-            loader = Docx2txtLoader(file_path)
-        elif ext == ".csv":
-            loader = CSVLoader(file_path)
+        existing = [c.name for c in self.qdrant_client.get_collections().collections]
+        if self.collection_name not in existing:
+            print(f"🆕 Creating collection '{self.collection_name}'")
+            self.qdrant_client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=models.VectorParams(
+                    size=self.vector_size, 
+                    distance=models.Distance.COSINE
+                ),
+            )
         else:
-            raise ValueError("❌ Unsupported file type!")
+            print(f"✅ Collection '{self.collection_name}' exists")
+
+    # ---------------- File loader ----------------
+    def load_file(self, path):
+        ext = os.path.splitext(path)[-1].lower()
+        if ext == ".pdf":
+            loader = PyPDFLoader(path)
+        elif ext == ".txt":
+            loader = TextLoader(path)
+        elif ext == ".docx":
+            loader = Docx2txtLoader(path)
+        elif ext == ".csv":
+            loader = CSVLoader(path)
+        else:
+            raise ValueError(f"Unsupported file type: {ext}")
         return loader.load()
 
     # ---------------- Text splitting ----------------
     def split_text(self, documents):
         splitter = RecursiveCharacterTextSplitter(
-            chunk_size=2000,
-            chunk_overlap=200,
-            length_function=len,
+            chunk_size=1200, chunk_overlap=150
         )
         return splitter.split_documents(documents)
 
-    # ---------------- Unique hash for deduplication ----------------
+    # ---------------- Unique doc hash ----------------
     def _doc_hash(self, doc: Document):
-        content = doc.page_content or ""
-        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+        return hashlib.sha256((doc.page_content or "").encode()).hexdigest()
 
-    # ---------------- Store documents in Qdrant ----------------
-    def store_in_qdrant(self, docs):
+    # ---------------- Store in Qdrant ----------------
+    def store_in_qdrant(self, docs, file_id=None):
         if not docs:
-            print("⚠️ No documents to insert into Qdrant.")
-            return 0
+            return 0, file_id
 
-        inserted_count = 0
+        self._ensure_collection()
         batch_size = 20
+        if not file_id:
+            file_id = str(uuid.uuid4())
+        inserted_count = 0
 
         for i in range(0, len(docs), batch_size):
             batch = docs[i:i + batch_size]
-            points_to_insert = []
-
-            for d in batch:
+            points = []
+            for doc in batch:
                 try:
-                    vector = self.embedding_model.embed_documents([d.page_content])[0]
-                    points_to_insert.append({
+                    vec = self.embedding_model.embed_documents(
+                        [doc.page_content]
+                    )[0]
+                    points.append({
                         "id": str(uuid.uuid4()),
-                        "vector": vector,
+                        "vector": vec,
                         "payload": {
-                            "page_content": d.page_content,
-                            **d.metadata,
-                            "doc_hash": self._doc_hash(d),
+                            **doc.metadata,
+                            "page_content": doc.page_content,
+                            "doc_hash": self._doc_hash(doc),
+                            "file_id": file_id
                         },
                     })
                 except Exception as e:
-                    print(f"⚠️ Skipped a document chunk due to embedding error: {e}")
+                    print(f"⚠️ Skipped chunk: {e}")
 
-            if points_to_insert:
+            if points:
                 try:
-                    self.client.upsert(collection_name=self.collection_name, points=points_to_insert)
-                    inserted_count += len(points_to_insert)
+                    self.qdrant_client.upsert(
+                        collection_name=self.collection_name, points=points
+                    )
+                    inserted_count += len(points)
                 except Exception as e:
                     print(f"❌ Failed to upsert batch: {e}")
 
-        print(f"✅ Inserted {inserted_count} documents into Qdrant.")
-        return inserted_count
+        return inserted_count, file_id
 
     # ---------------- Ingest plain text ----------------
-    def ingest_text(self, text):
+    def ingest_text(self, text, file_id=None):
         if not text.strip():
-            raise ValueError("⚠️ Text content is empty!")
+            raise ValueError("Text empty")
         docs = [Document(page_content=text)]
         chunks = self.split_text(docs)
-        return self.store_in_qdrant(chunks)
+        return self.store_in_qdrant(chunks, file_id=file_id)
 
-    # ---------------- Ask query ----------------
-    def ask(self, query):
+    # ---------------- Memory ----------------
+    def get_memory(self, file_id):
+        return ConversationBufferMemory(
+            memory_key=f"chat_history_{file_id}", return_messages=True
+        )
+
+    # ---------------- Ask ----------------
+    def ask(self, query, file_id=None):
         if not query.strip():
-            return {"error": "Query is missing"}
+            return {"error": "Query missing"}
 
+        memory = (
+            self.get_memory(file_id)
+            if file_id
+            else ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+        )
         qdrant_store = Qdrant(
-            client=self.client,
+            client=self.qdrant_client,
             collection_name=self.collection_name,
             embeddings=self.embedding_model,
         )
@@ -161,88 +153,75 @@ class RAGPipeline:
         related_docs = retriever.get_relevant_documents(query)
 
         if not related_docs:
-            return {"answer": "No relevant context found in Qdrant."}
+            return {"answer": "No relevant context found"}
 
         context = "\n".join([d.page_content for d in related_docs])
-        chat_history = self.memory.load_memory_variables({}).get("chat_history", "")
+        chat_history = memory.load_memory_variables({}).get(memory.memory_key, "")
 
-        prompt = f"""
-Previous conversation:
-{chat_history}
-
-User asked: {query}
-
-Relevant context:
-{context}
-
-Answer clearly, accurately, and conversationally:
-"""
+        prompt = (
+            f"Previous conversation:\n{chat_history}\n"
+            f"User asked: {query}\n"
+            f"Relevant context:\n{context}\n"
+            "Answer clearly:"
+        )
 
         llm = ChatGoogleGenerativeAI(
             model="gemini-2.0-flash",
             api_key=self.gemini_api_key,
             temperature=0.3,
-            max_output_tokens=500,
+            max_output_tokens=2000,
         )
-
         try:
             response = llm.invoke(prompt)
             answer = getattr(response, "content", str(response))
-            self.memory.save_context({"input": query}, {"output": answer})
+            memory.save_context({"input": query}, {"output": answer})
             return {"answer": answer}
         except Exception as e:
             return {"error": f"Gemini API failed: {e}"}
 
-    # ---------------- Ask query (Streaming) ----------------
-    def ask_stream(self, query):
+    # ---------------- Ask Stream ----------------
+    def ask_stream(self, query, file_id=None):
+        if not query.strip():
+            yield "Query missing"
+            return
+        memory = (
+            self.get_memory(file_id)
+            if file_id
+            else ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+        )
+        qdrant_store = Qdrant(
+            client=self.qdrant_client,
+            collection_name=self.collection_name,
+            embeddings=self.embedding_model,
+        )
+        retriever = qdrant_store.as_retriever(search_kwargs={"k": 4})
+        related_docs = retriever.get_relevant_documents(query)
+
+        if not related_docs:
+            yield "No relevant documents found.\n"
+            return
+
+        context = "\n".join([d.page_content for d in related_docs])
+        chat_history = memory.load_memory_variables({}).get(memory.memory_key, "")
+        prompt = (
+            f"Previous conversation:\n{chat_history}\n"
+            f"User asked: {query}\n"
+            f"Relevant context:\n{context}\n"
+            "Answer clearly:"
+        )
+
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.0-flash",
+            api_key=self.gemini_api_key,
+            temperature=0.3,
+            max_output_tokens=2000,
+        )
         try:
-            if not query.strip():
-                yield "Error: Query is missing"
-                return
-
-            qdrant_store = Qdrant(
-                client=self.client,
-                collection_name=self.collection_name,
-                embeddings=self.embedding_model,
-            )
-
-            retriever = qdrant_store.as_retriever(search_kwargs={"k": 4})
-            related_docs = retriever.get_relevant_documents(query)
-
-            if not related_docs:
-                yield "No relevant documents found.\n"
-                return
-
-            context = "\n".join([d.page_content for d in related_docs])
-            chat_history = self.memory.load_memory_variables({}).get("chat_history", "")
-
-            prompt = f"""
-Previous conversation:
-{chat_history}
-
-User asked: {query}
-
-Relevant context:
-{context}
-
-Answer clearly and conversationally:
-"""
-
-            llm = ChatGoogleGenerativeAI(
-                model="gemini-2.0-flash",
-                api_key=self.gemini_api_key,
-                temperature=0.3,
-                max_output_tokens=500,
-            )
-
             response = llm.invoke(prompt)
             answer = getattr(response, "content", str(response))
-
             for line in answer.split("\n"):
                 yield line + "\n"
                 time.sleep(0.05)
-
-            self.memory.save_context({"input": query}, {"output": answer})
-
+            memory.save_context({"input": query}, {"output": answer})
         except Exception as e:
             yield f"❌ Gemini request failed: {str(e)}\n"

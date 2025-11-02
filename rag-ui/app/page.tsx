@@ -8,8 +8,8 @@ export default function Page() {
   return (
     <main className="flex h-screen bg-gray-100 dark:bg-gray-950 text-gray-900 dark:text-gray-100 overflow-hidden">
       {/* Sidebar */}
-      <aside className="w-72 bg-white dark:bg-gray-900 p-6 shadow-lg flex flex-col justify-between fixed left-0 top-0 bottom-0">
-        <div className="flex-1 overflow-y-auto">
+      <aside className="w-72 bg-white dark:bg-gray-900 p-6 shadow-lg flex flex-col justify-between fixed left-0 top-0 bottom-0 overflow-y-auto scrollbar-hide">
+        <div className="flex-1">
           <h2 className="text-xl font-semibold mb-4">📁 Upload & Process</h2>
           <FileUploader />
         </div>
@@ -19,10 +19,12 @@ export default function Page() {
       </aside>
 
       {/* Chat Area */}
-      <section className="flex-1 flex flex-col p-6 relative ml-72 overflow-y-auto h-screen">
-        {/* Removed duplicate ThemeToggle */}
-        <h2 className="text-2xl font-semibold mb-4">💬 Chat Interface</h2>
-        <ChatBox />
+      <section className="flex-1 flex flex-col ml-72 h-screen">
+        {/* ✅ Chat content scrolls, but scrollbar hidden */}
+        <div className="flex-1 overflow-y-auto scrollbar-hide p-6">
+          <h2 className="text-2xl font-semibold mb-4">💬 Chat Interface</h2>
+          <ChatBox />
+        </div>
       </section>
     </main>
   );

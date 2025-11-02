@@ -27,3 +27,40 @@ body {
 .dark body {
   @apply bg-gray-900 text-white; /* Dark mode */
 }
+
+/* ✅ Hide scrollbar but keep scroll working */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none; /* Chrome, Safari */
+}
+
+.scrollbar-hide {
+  -ms-overflow-style: none; /* IE, Edge */
+  scrollbar-width: none; /* Firefox */
+}
+
+/* ✅ Smooth scrolling */
+html {
+  scroll-behavior: smooth;
+}
+
+html,
+body {
+  overflow: hidden;
+  height: 100%;
+}
+
+/* 🌟 Fade-in animation for welcome message */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.8s ease-in-out;
+}

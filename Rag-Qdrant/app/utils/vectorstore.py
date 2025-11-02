@@ -1,27 +1,27 @@
-# utils/vectorstore.py
-
 import os
 import uuid
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from langchain_community.vectorstores import Qdrant
-from ..utils.embeddings import get_embeddings_model  # should return GoogleGenerativeEmbeddings
+from app.utils.embeddings import get_embeddings_model
+
 
 def get_qdrant_client():
-    """Return connected Qdrant client with extended timeout."""
+    """Initialize and return Qdrant client."""
     qdrant_url = os.getenv("QDRANT_URL")
     qdrant_api_key = os.getenv("QDRANT_API_KEY")
     return QdrantClient(url=qdrant_url, api_key=qdrant_api_key, timeout=180)
 
 
-def get_vectorstore(collection_name: str = "rag_collection", docs=None):
+def get_vectorstore(collection_name="rag_collection", docs=None):
     """
-    Initialize or connect to Qdrant vector store and insert documents if provided.
+    Create or load a Qdrant vectorstore.
+    If docs are provided, they will be embedded and inserted into the collection.
     """
     client = get_qdrant_client()
     embeddings = get_embeddings_model()
 
-    # Determine vector size dynamically from embedding model
+    # Get vector size dynamically
     test_vector = embeddings.embed_documents(["test"])[0]
     vector_size = len(test_vector)
 
@@ -30,12 +30,13 @@ def get_vectorstore(collection_name: str = "rag_collection", docs=None):
     if not any(c.name == collection_name for c in collections.collections):
         client.recreate_collection(
             collection_name=collection_name,
-            vectors_config=models.VectorParams(size=vector_size, distance=models.Distance.COSINE)
+            vectors_config=models.VectorParams(size=vector_size, distance=models.Distance.COSINE),
         )
 
+    # Create LangChain-compatible vectorstore
     vectorstore = Qdrant(client=client, collection_name=collection_name, embeddings=embeddings)
 
-    # Insert documents in batches if docs provided
+    # Optional: ingest documents
     if docs:
         batch_size = 20
         for i in range(0, len(docs), batch_size):
@@ -45,26 +46,18 @@ def get_vectorstore(collection_name: str = "rag_collection", docs=None):
                 {
                     "id": str(uuid.uuid4()),
                     "vector": vec,
-                    "payload": {**d.metadata, "page_content": d.page_content}
+                    "payload": {**d.metadata, "page_content": d.page_content},
                 }
                 for d, vec in zip(batch, vectors)
             ]
             client.upsert(collection_name=collection_name, points=points)
 
     return vectorstore
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-
-# --------------------- Delete document from collection ---------------------
-def delete_document_from_vectorstore(collection_name: str, doc_id: str):
-    """
-    Delete a single document from the Qdrant collection using its ID.
-    """
-    client = get_qdrant_client()
-    try:
-        client.delete(
-            collection_name=collection_name,
-            points=[doc_id]
+    text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            separators=["\n\n", "\n", " ", ""]
         )
-        print(f"Document {doc_id} deleted successfully from collection '{collection_name}'")
-    except Exception as e:
-        print(f"Failed to delete document {doc_id}: {e}")
+    return text_splitter.split_documents(documents)

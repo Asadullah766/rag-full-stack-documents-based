@@ -1,86 +1,101 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 
 export default function FileUploader() {
   const [uploadStatus, setUploadStatus] = useState<string>("");
   const [fileName, setFileName] = useState<string>("");
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [processProgress, setProcessProgress] = useState<number>(0);
-  const [processing, setProcessing] = useState<boolean>(false);
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [isUploaded, setIsUploaded] = useState<boolean>(false);
 
-  // 🔹 Upload Function
+  // ---------------- File Upload ----------------
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return;
     const file = e.target.files[0];
+
     setFileName(file.name);
-
-    const formData = new FormData();
-    formData.append("file", file);
-
-    setUploadStatus("⏳ Uploading...");
     setUploadProgress(0);
+    setUploadStatus("⏳ Uploading...");
+    setIsUploaded(false);
 
     try {
+      const formData = new FormData();
+      formData.append("file", file);
+
       const res = await fetch("http://127.0.0.1:8000/ingest", {
         method: "POST",
         body: formData,
       });
 
       if (!res.ok) throw new Error("Upload failed");
-      const data = await res.json();
-      setUploadStatus("✅ File uploaded successfully!");
-      setUploadProgress(100);
 
-      console.log("Server:", data);
+      // Simulate upload progress
+      let progress = 0;
+      const interval = setInterval(() => {
+        progress += 20;
+        if (progress >= 100) {
+          progress = 100;
+          clearInterval(interval);
+          setUploadStatus("✅ Uploaded");
+          setUploadProgress(0);
+          setIsUploaded(true);
+        } else {
+          setUploadProgress(progress);
+        }
+      }, 150);
     } catch (err) {
       console.error(err);
       setUploadStatus("❌ Upload failed. Check backend.");
       setUploadProgress(0);
+      setIsUploaded(false);
     }
   };
 
-  // 🔹 Process Function
+  // ---------------- Process (Polling Backend Status) ----------------
   const handleProcess = async () => {
     if (!fileName) {
       setUploadStatus("⚠️ Please upload a file first!");
       return;
     }
 
-    setUploadStatus("🔄 Processing file...");
-    setProcessProgress(0);
-    setProcessing(true);
+    setIsProcessing(true);
+    setUploadStatus("🔄 Processing...");
+    setProcessProgress(10);
 
-    // Poll backend for real progress
+    // Start polling backend for ingestion status
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`http://127.0.0.1:8000/process/${fileName}`);
-        if (!res.ok) throw new Error("Process failed");
-
+        const res = await fetch(`http://127.0.0.1:8000/status/${fileName}`);
         const data = await res.json();
-        setProcessProgress(data.progress || 0);
 
-        if (data.status === "done") {
-          setUploadStatus("✅ Processing complete!");
-          setProcessing(false);
+        if (data.status === "completed") {
+          setUploadStatus("✅ Process completed");
+          setProcessProgress(0);
           clearInterval(interval);
+          setIsProcessing(false);
         } else if (data.status === "failed") {
-          setUploadStatus("❌ Processing failed!");
-          setProcessing(false);
+          setUploadStatus("❌ Process failed");
+          setProcessProgress(0);
           clearInterval(interval);
+          setIsProcessing(false);
+        } else {
+          // Still processing
+          setUploadStatus("⏳ Processing...");
+          setProcessProgress((prev) => (prev < 90 ? prev + 10 : prev)); // smooth animation
         }
       } catch (err) {
         console.error(err);
-        setUploadStatus("❌ Processing failed. Check backend.");
-        setProcessing(false);
-        clearInterval(interval);
+        setUploadStatus("⚠️ Error checking process status");
       }
-    }, 500); // Poll every 0.5s
+    }, 2000); // check every 2s
   };
 
+  // ---------------- UI ----------------
   return (
     <div className="flex flex-col gap-4">
-      {/* Upload */}
+      {/* Upload Box */}
       <label
         htmlFor="fileInput"
         className="border-2 border-dashed border-gray-400 dark:border-gray-600 p-6 rounded-xl text-center cursor-pointer hover:border-blue-500 dark:hover:border-blue-400 transition"
@@ -96,40 +111,53 @@ export default function FileUploader() {
         />
       </label>
 
-      {/* Upload Progress Bar */}
+      {/* File Name */}
+      {isUploaded && fileName && (
+        <div className="flex justify-center">
+          <span className="text-gray-700 dark:text-gray-200 font-medium truncate">
+            {fileName}
+          </span>
+        </div>
+      )}
+
+      {/* Upload Progress */}
       {uploadProgress > 0 && (
-        <div className="w-full bg-gray-200 dark:bg-gray-700 h-3 rounded-full overflow-hidden">
+        <div className="w-full bg-gray-300 dark:bg-gray-700 h-2 rounded-full overflow-hidden">
           <div
-            className="bg-blue-600 h-3"
-            style={{ width: `${uploadProgress}%`, transition: "width 0.2s" }}
+            className="bg-blue-500 h-2 transition-all"
+            style={{ width: `${uploadProgress}%` }}
           />
         </div>
       )}
 
       {/* Process Button */}
-      <button
-        onClick={handleProcess}
-        className={`bg-blue-600 hover:bg-blue-700 text-white rounded-xl py-3 transition ${
-          processing ? "opacity-50 cursor-not-allowed" : ""
-        }`}
-        disabled={processing}
-      >
-        ⚙️ Process File
-      </button>
+      {isUploaded && (
+        <div className="flex justify-center mt-2">
+          <button
+            onClick={handleProcess}
+            className="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-xl"
+            disabled={isProcessing}
+          >
+            {isProcessing ? "Processing..." : "Process"}
+          </button>
+        </div>
+      )}
 
-      {/* Process Progress Bar */}
+      {/* Process Progress */}
       {processProgress > 0 && (
-        <div className="w-full bg-gray-200 dark:bg-gray-700 h-3 rounded-full overflow-hidden">
+        <div className="w-full bg-gray-300 dark:bg-gray-700 h-2 rounded-full overflow-hidden">
           <div
-            className="bg-green-500 h-3"
-            style={{ width: `${processProgress}%`, transition: "width 0.2s" }}
+            className="bg-green-500 h-2 transition-all"
+            style={{ width: `${processProgress}%` }}
           />
         </div>
       )}
 
       {/* Status */}
       {uploadStatus && (
-        <p className="text-sm text-gray-600 dark:text-gray-300">{uploadStatus}</p>
+        <p className="text-sm text-gray-600 dark:text-gray-300 text-center mt-1">
+          {uploadStatus}
+        </p>
       )}
     </div>
   );
