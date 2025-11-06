@@ -22,8 +22,8 @@ class RAGPipeline:
         self.embedding_model = get_embeddings_model()
         self.collection_name = settings.VECTOR_COLLECTION_NAME
         self.qdrant_client = QdrantClient(
-            url=settings.QDRANT_URL, 
-            api_key=settings.QDRANT_API_KEY, 
+            url=settings.QDRANT_URL,
+            api_key=settings.QDRANT_API_KEY,
             timeout=180
         )
         self.gemini_api_key = settings.GEMINI_API_KEY
@@ -31,7 +31,7 @@ class RAGPipeline:
         # Determine vector size
         try:
             self.vector_size = len(self.embedding_model.embed_query("test"))
-        except:
+        except Exception:
             self.vector_size = 768
 
         self._ensure_collection()
@@ -44,12 +44,23 @@ class RAGPipeline:
             self.qdrant_client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=models.VectorParams(
-                    size=self.vector_size, 
+                    size=self.vector_size,
                     distance=models.Distance.COSINE
                 ),
             )
         else:
             print(f"✅ Collection '{self.collection_name}' exists")
+
+        # ✅ Ensure payload index for file_id (Fix for Bad Request error)
+        try:
+            self.qdrant_client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="file_id",
+                field_schema=models.PayloadSchemaType.KEYWORD
+            )
+            print("✅ Qdrant index ensured for 'file_id'")
+        except Exception as e:
+            print(f"⚠️ Skipped creating 'file_id' index (might already exist): {e}")
 
     # ---------------- File loader ----------------
     def load_file(self, path):

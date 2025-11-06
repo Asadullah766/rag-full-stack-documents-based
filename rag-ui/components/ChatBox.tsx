@@ -24,9 +24,24 @@ export default function ChatBox() {
   const stopRef = useRef(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
+  // ✅ Scroll to bottom when new message arrives
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // ✅ NEW: Reset chat when file process completes
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const resetFlag = localStorage.getItem("resetChat");
+      if (resetFlag === "true") {
+        setMessages([]); // clear chat
+        setInput(""); // clear input box
+        localStorage.removeItem("resetChat"); // remove trigger
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, []);
 
   const typeMessage = async (fullText: string) => {
     stopRef.current = false;

@@ -9,12 +9,13 @@ import time
 
 from app.rag_pipeline import RAGPipeline
 from app.utils.file_loader import load_file_content
+from qdrant_client.http import models  # ✅ Added for Qdrant checks
 
 # ------------------ FastAPI Setup ------------------
 app = FastAPI(
     title="RAG-Qdrant Backend",
     version="2.0",
-    description="RAG backend with complete file_id based ingestion (no delete)"
+    description="RAG backend with complete file_id based ingestion (Qdrant auto-sync)"
 )
 
 app.add_middleware(
@@ -43,6 +44,27 @@ def save_status():
         json.dump(status_data, f, indent=2)
 
 executor = ThreadPoolExecutor(max_workers=2)
+
+# ------------------ Qdrant File Existence Check ------------------
+def check_qdrant_file_exists(file_id: str):
+    """Check if file_id still exists in Qdrant"""
+    try:
+        result = rag.qdrant_client.scroll(
+            collection_name=rag.collection_name,
+            scroll_filter=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="file_id",
+                        match=models.MatchValue(value=file_id)
+                    )
+                ]
+            ),
+            limit=1
+        )
+        return len(result[0]) > 0
+    except Exception as e:
+        print(f"⚠️ Qdrant check failed: {e}")
+        return False
 
 # ------------------ Background ingestion ------------------
 def ingest_text_thread(file_path, filename):
@@ -96,12 +118,30 @@ async def ingest_file(file: UploadFile, background_tasks: BackgroundTasks):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
 
-# ------------------ Status Endpoint ------------------
+# ------------------ Status Endpoint (with Qdrant sync) ------------------
 @app.get("/status/{filename}")
 def get_status(filename: str):
+    file_path = os.path.join(UPLOAD_FOLDER, filename)
+
+    # ✅ If local file missing → remove from status_data
+    if not os.path.exists(file_path):
+        if filename in status_data:
+            del status_data[filename]
+            save_status()
+        raise HTTPException(status_code=404, detail="File not found or deleted")
+
     status = status_data.get(filename)
     if not status:
         raise HTTPException(status_code=404, detail="File not found")
+
+    # ✅ Verify with Qdrant cloud
+    file_id = status.get("file_id")
+    if file_id and not check_qdrant_file_exists(file_id):
+        print(f"⚠️ File vectors for {filename} not found in Qdrant — removing from status_data")
+        del status_data[filename]
+        save_status()
+        raise HTTPException(status_code=404, detail="File deleted from Qdrant")
+
     return status
 
 # ------------------ Process Endpoint ------------------
